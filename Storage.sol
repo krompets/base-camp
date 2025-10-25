@@ -2,59 +2,42 @@
 pragma solidity ^0.8.17;
 
 contract EmployeeStorage {
-    // ---- Storage (packed) ----
-    // Два 32-бітні значення йдуть підряд і пакуються в один слот
-    uint32 private shares;   // кількість акцій (директори > 5000 — зберігаються в іншому контракті)
-    uint32 private salary;   // 0..1_000_000
+    // packed у одному слоті
+    uint16 private shares;     // кількість акцій (приватна)
+    uint32 private salary;     // зарплата 0..1_000_000 (приватна)
 
-    // Динамічний тип у власному слоті
-    string public name;
+    // окремі слоти
+    uint256 public idNumber;   // ID співробітника (публічний)
+    string public name;        // ім'я (публічний)
 
-    // Повний uint256 (ID може бути будь-яким до 2^256-1)
-    uint256 public idNumber;
-
-    // ---- Errors ----
-    error TooManyShares(uint256 wouldHave);
-
-    // ---- Constructor ----
-    // Для тесту деплой з параметрами:
-    // shares=1000, name="Pat", salary=50000, idNumber=112358132134
-    constructor(
-        uint32 _shares,
-        string memory _name,
-        uint32 _salary,
-        uint256 _idNumber
-    ) {
+    // Конструктор
+    constructor(uint16 _shares, string memory _name, uint32 _salary, uint256 _idNumber) {
         shares = _shares;
         name = _name;
-        salary = _salary;        // у межах 0..1_000_000
+        salary = _salary;
         idNumber = _idNumber;
     }
 
-    // ---- Views ----
-    function viewSalary() external view returns (uint256) {
-        return salary;
-    }
-
-    function viewShares() external view returns (uint256) {
+    // View-функції
+    function viewShares() public view returns (uint16) {
         return shares;
     }
 
-    // ---- Mutations ----
-    function grantShares(uint256 _newShares) public {
-        // якщо намагаються додати одним махом > 5000
+    function viewSalary() public view returns (uint32) {
+        return salary;
+    }
+
+    // Кастомна помилка
+    error TooManyShares(uint16 _shares);
+
+    // Надати акції
+    function grantShares(uint16 _newShares) public {
         if (_newShares > 5000) {
             revert("Too many shares");
+        } else if (shares + _newShares > 5000) {
+            revert TooManyShares(shares + _newShares);
         }
-
-        uint256 newTotal = uint256(shares) + _newShares;
-
-        // якщо підсумок перевищить 5000 — кастомна помилка з майбутнім значенням
-        if (newTotal > 5000) {
-            revert TooManyShares(newTotal);
-        }
-
-        shares = uint32(newTotal);
+        shares += _newShares;
     }
 
     /**
@@ -70,7 +53,7 @@ contract EmployeeStorage {
     */
     function checkForPacking(uint _slot) public view returns (uint r) {
         assembly {
-            r := sload(_slot)
+            r := sload (_slot)
         }
     }
 
