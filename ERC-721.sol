@@ -1,115 +1,140 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.17;
 
-/* --------------------- Custom Errors --------------------- */
-error HaikuNotUnique();
-error NotYourHaiku(uint id);
-error NoHaikusShared();
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
-/* --------------------- Minimal ERC721 Implementation --------------------- */
-contract MinimalERC721 {
-    event Transfer(address indexed from, address indexed to, uint indexed tokenId);
+contract WeightedVoting is ERC20 {
+    using EnumerableSet for EnumerableSet.AddressSet;
 
-    string public name;
-    string public symbol;
+    // ───── Errors ─────
+    error TokensClaimed();
+    error AllTokensClaimed();
+    error NoTokensHeld();
+    error QuorumTooHigh(uint256 quorum); // повертаємо кворум, як вимагається
+    error AlreadyVoted();
+    error VotingClosed();
 
-    mapping(uint => address) internal _owners;
-    mapping(address => uint) internal _balances;
-
-    constructor(string memory _name, string memory _symbol) {
-        name = _name;
-        symbol = _symbol;
+    // ───── Vote enum ─────
+    enum Vote {
+        AGAINST,
+        FOR,
+        ABSTAIN
     }
 
-    function ownerOf(uint tokenId) public view returns (address) {
-        return _owners[tokenId];
+    // ───── Issue (порядок полів строго за умовою!) ─────
+    struct Issue {
+        EnumerableSet.AddressSet voters; // 1
+        string issueDesc;                // 2
+        uint256 votesFor;                // 3
+        uint256 votesAgainst;            // 4
+        uint256 votesAbstain;            // 5
+        uint256 totalVotes;              // 6
+        uint256 quorum;                  // 7
+        bool passed;                     // 8
+        bool closed;                     // 9
     }
 
-    function balanceOf(address owner) public view returns (uint) {
-        return _balances[owner];
+    // Для повернення назовні (без internal-типу)
+    struct SerializedIssue {
+        address[] voters;
+        string issueDesc;
+        uint256 votesFor;
+        uint256 votesAgainst;
+        uint256 votesAbstain;
+        uint256 totalVotes;
+        uint256 quorum;
+        bool passed;
+        bool closed;
     }
 
-    function _mint(address to, uint tokenId) internal {
-        require(to != address(0), "Mint to zero address");
-        require(_owners[tokenId] == address(0), "Token already minted");
+    // ───── Storage ─────
+    Issue[] internal issues;                 // не public через internal-тип
+    mapping(address => bool) public tokensClaimed;
 
-        _balances[to] += 1;
-        _owners[tokenId] = to;
+    uint256 public constant maxSupply   = 1_000_000;
+    uint256 public constant claimAmount = 100;
 
-        emit Transfer(address(0), to, tokenId);
-    }
-}
-
-/* --------------------- Main Contract --------------------- */
-contract HaikuNFT is MinimalERC721 {
-    struct Haiku {
-        address author;
-        string line1;
-        string line2;
-        string line3;
+    // ───── Constructor ─────
+    constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {
+        // "спалюємо" нульовий елемент, щоб id починався з 1
+        issues.push();
     }
 
-    Haiku[] public haikus;                     // Усі хайку
-    mapping(address => uint[]) public sharedHaikus; // кому поділились → id хайку
-    uint public counter = 1;                   // id починається з 1
+    // ───── Claim ─────
+    function claim() public {
+        // спочатку перевіряємо, чи не закінчилась макс. емісія
+        if (totalSupply() + claimAmount > maxSupply) revert AllTokensClaimed();
+        if (tokensClaimed[msg.sender]) revert TokensClaimed();
 
-    // Для перевірки унікальності рядків
-    mapping(bytes32 => bool) private usedLines;
-
-    constructor() MinimalERC721("HaikuNFT", "HAIKU") {}
-
-    /**
-     * @dev Мінтить новий хайку NFT, якщо всі рядки унікальні.
-     */
-    function mintHaiku(
-        string memory line1,
-        string memory line2,
-        string memory line3
-    ) external {
-        // Перевірка унікальності рядків (будь-який дубль — revert)
-        if (usedLines[keccak256(bytes(line1))] ||
-            usedLines[keccak256(bytes(line2))] ||
-            usedLines[keccak256(bytes(line3))]) revert HaikuNotUnique();
-
-        // Позначаємо рядки як використані
-        usedLines[keccak256(bytes(line1))] = true;
-        usedLines[keccak256(bytes(line2))] = true;
-        usedLines[keccak256(bytes(line3))] = true;
-
-        uint tokenId = counter;
-        counter++; // лічильник для наступного ID
-
-        // Мінт токена
-        _mint(msg.sender, tokenId);
-
-        // Зберігаємо хайку
-        haikus.push(Haiku(msg.sender, line1, line2, line3));
+        tokensClaimed[msg.sender] = true;
+        _mint(msg.sender, claimAmount);
     }
 
-    /**
-     * @dev Дозволяє власнику хайку поділитися ним з іншою адресою.
-     */
-    function shareHaiku(uint id, address _to) public {
-        address owner = ownerOf(id);
-        if (owner != msg.sender) revert NotYourHaiku(id);
+    // ───── Create Issue ─────
+    // ВАЖЛИВО: перевірка "є токени" має стояти ПЕРЕД перевіркою кворуму (так вимагає тест)
+    function createIssue(string calldata _issueDesc, uint256 _quorum)
+        external
+        returns (uint256)
+    {
+        if (balanceOf(msg.sender) == 0) revert NoTokensHeld();
+        if (_quorum > totalSupply()) revert QuorumTooHigh(_quorum);
 
-        sharedHaikus[_to].push(id);
+        Issue storage isr = issues.push();
+        isr.issueDesc = _issueDesc;
+        isr.quorum = _quorum;
+
+        return issues.length - 1; // індекс нового issue (0 — порожній)
     }
 
-    /**
-     * @dev Повертає всі хайку, якими поділилися з викликачем.
-     */
-    function getMySharedHaikus() public view returns (Haiku[] memory) {
-        uint[] memory ids = sharedHaikus[msg.sender];
-        uint len = ids.length;
+    // ───── Get Issue (серіалізований) ─────
+    function getIssue(uint256 _issueId)
+        external
+        view
+        returns (SerializedIssue memory)
+    {
+        Issue storage isr = issues[_issueId];
+        return SerializedIssue({
+            voters: isr.voters.values(),
+            issueDesc: isr.issueDesc,
+            votesFor: isr.votesFor,
+            votesAgainst: isr.votesAgainst,
+            votesAbstain: isr.votesAbstain,
+            totalVotes: isr.totalVotes,
+            quorum: isr.quorum,
+            passed: isr.passed,
+            closed: isr.closed
+        });
+    }
 
-        if (len == 0) revert NoHaikusShared();
+    // ───── Vote ─────
+    function vote(uint256 _issueId, Vote _vote) public {
+        Issue storage isr = issues[_issueId];
 
-        Haiku[] memory result = new Haiku[](len);
-        for (uint i = 0; i < len; i++) {
-            result[i] = haikus[ids[i] - 1]; // бо id починається з 1
+        if (isr.closed) revert VotingClosed();
+        if (isr.voters.contains(msg.sender)) revert AlreadyVoted();
+
+        uint256 weight = balanceOf(msg.sender);
+        if (weight == 0) revert NoTokensHeld();
+
+        // додаємо голоси за вагою
+        if (_vote == Vote.AGAINST) {
+            isr.votesAgainst += weight;
+        } else if (_vote == Vote.FOR) {
+            isr.votesFor += weight;
+        } else {
+            isr.votesAbstain += weight;
         }
-        return result;
+
+        isr.voters.add(msg.sender);
+        isr.totalVotes += weight;
+
+        // закриття по досягненню/перевищенню кворуму
+        if (isr.totalVotes >= isr.quorum) {
+            isr.closed = true;
+            if (isr.votesFor > isr.votesAgainst) {
+                isr.passed = true;
+            }
+        }
     }
 }
-
